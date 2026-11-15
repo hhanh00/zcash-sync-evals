@@ -2,7 +2,7 @@
 #
 # Per range, on one standard runner: build every component at a pinned commit,
 # fetch the range's chain data from a release and check it against a pinned
-# SHA-256, then run 6 rounds, one per order of the wallets. Each wallet is timed from outside,
+# SHA-256, then run 4 rounds, each a different order of the wallets. Each wallet is timed from outside,
 # launch to exit of its `sync` step, under the same limits. Any MISS, or any
 # wallet not ending at the tip, fails the run. The results are then attested.
 
@@ -18,14 +18,15 @@ env:
   LIGHTWALLETD_COMMIT: 0bf0a40854de6bd9a50400f94f0f94fbb53ac743 # zcash/lightwalletd v0.6.1
   SLIPSTREAM_COMMIT: 4e49e9ddfd703cbfbdbc1fe0b1f5887e566341ea # zodl-inc/slipstream 0.4.1
   VIZOR_COMMIT: a20f0171678c1b2c316504d53b8aba4e0e8f2616 # chainapsis/vizor-wallet
-  ZKOOL_COMMIT: 69f08b9745c8cfc981418f1fc5c69c3a65c469fa # hhanh00/zkool2
+  ZKOOL_COMMIT: c5fead439ea56821c2c17420f19244e353d0ea8f # hhanh00/zkool2 feat/fetch-by-backend
   RUST_VERSION: 1.98.0
   # The public BIP-39 test seed: the index tracks exactly its transparent addresses.
   SEED: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art
   DELAY: 50ms
   RATE: 100mbit
-  # Every order of the three wallets once, so each runs first, second and last twice.
-  ROUNDS: zodl,vizor,zkool vizor,zkool,zodl zkool,zodl,vizor zkool,vizor,zodl vizor,zodl,zkool zodl,zkool,vizor
+  # Four of the 24 orders of the four wallets, chosen so each wallet runs in every
+  # position once and right after every other wallet once.
+  ROUNDS: zodl,vizor,zkool-udon,zkool vizor,zkool,zodl,zkool-udon zkool,zkool-udon,vizor,zodl zkool-udon,zodl,zkool,vizor
 
 jobs:
   bench:
@@ -118,6 +119,9 @@ jobs:
           (cd "$SRC/zkool" && rustc --version | tee "$RUNNER_TEMP/zkool-rust.txt" \
             && cargo build --release --locked --manifest-path rust/Cargo.toml --no-default-features --features graphql --example sync_eval)
           cp "$SRC/zkool/target/release/examples/sync_eval" "$BIN/zkool_sync_eval"
+          # The same build with batched Orchard and Ironwood key agreement (off by default in Zkool).
+          (cd "$SRC/zkool" && cargo build --release --locked --manifest-path rust/Cargo.toml --no-default-features --features graphql,zakura-udon --example sync_eval)
+          cp "$SRC/zkool/target/release/examples/sync_eval" "$BIN/zkool_sync_eval_udon"
           rm -rf "$SRC/zkool/target"
 
       - name: Fetch chain data
@@ -153,7 +157,7 @@ jobs:
           sudo tc filter add dev lo parent 1: protocol ip prio 1 u32 match ip sport 9067 0xffff flowid 1:4
           tc qdisc show dev lo | tee "$RESULTS/network.txt"
 
-      - name: Run 6 rounds
+      - name: Run 4 rounds
         run: |
           export PATH="$BIN:$PATH"
           round=0
@@ -166,6 +170,7 @@ jobs:
                 zodl) cmd=(sh wallets/zodl/sync.sh) ;;
                 vizor) cmd=(sync_eval) ;;
                 zkool) cmd=(zkool_sync_eval) ;;
+                zkool-udon) cmd=(zkool_sync_eval_udon) ;;
               esac
               sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
               echo "round $round: $wallet"
@@ -189,8 +194,10 @@ jobs:
             jq -e --argjson tip "$TIP" '.synced_height == $tip' "$r/zodl/result.json" > /dev/null
             jq -e --argjson tip "$TIP" '.synced_height == $tip and .chain_tip == $tip and .received_notes == 0
               and .history_entries == 0 and .balance.total == 0' "$r/vizor/result.json" > /dev/null
-            jq -e --argjson tip "$TIP" '.synced_height == $tip and .received_notes == 0
-              and .history_entries == 0 and .balance.total == 0' "$r/zkool/result.json" > /dev/null
+            for k in zkool zkool-udon; do
+              jq -e --argjson tip "$TIP" '.synced_height == $tip and .received_notes == 0
+                and .history_entries == 0 and .balance.total == 0' "$r/$k/result.json" > /dev/null
+            done
             z="$r/zodl/work/sync.log"
             grep -q 'notes found: sapling 0 orchard 0' "$z"
             grep -q 'utxos: 0 across' "$z"
